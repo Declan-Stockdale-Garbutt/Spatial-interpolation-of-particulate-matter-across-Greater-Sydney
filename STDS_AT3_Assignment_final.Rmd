@@ -1,0 +1,562 @@
+---
+title: "Spatial interpolation of particulate matter across Greater Sydney"
+author: 'Declan Stockdale - 112145549'
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: html_document
+---
+
+```{r, include=FALSE}
+# Clear everything in environment
+rm(list = ls(all.names = TRUE))
+#base packages
+library(tidyverse)
+library(sf) 
+library(sp) 
+library(raster)
+
+# geostatistics packages 
+library(gstat) 
+library(automap)
+library(fields)
+
+#plotting packages
+library(patchwork)
+library(viridis)
+library(leaflet)
+library(scales)
+
+library(geosphere)
+
+
+## Raster causes a conflict with dplyr select so this code contains workarounds that bloat the code
+```
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+## Introduction
+
+The 2019 - 2020 bushfires season that ravaged New South Wales (NSW) was unprecedented in both intensity and scale with approximately 18.2 million hectares being burnt (Fire and Rescue NSW, 2021) . This led to the generation of enormous long lasting smoke plums comprised on fine particles (particulate matter, PM) which blanketed large areas of NSW. The largest population center in NSW, Sydney with a population of over 5.3 million people, was engulfed by smoke for numerous days over the bush fire period at times recording PM10 (particulate matter sub 10 um) in excess of 10 times hazardous levels (Nguyen & Bullen, 2019). During these periods of intense smoke cover, Sydney had the worse air quality in the world (Clark, 2019)
+
+Exposure to PM10 at elevated levels can cause numerous health hazards. It has been linked to (insert conditions). It can also exacerbate existing medical conditions, most commonly affecting those with asthma and/or other respiratory ailments (World Health Organisation, 2021). The cost to the healthcare system from exposure to PM10 is estimated to be as high as 8.4 billion dollars annually (Department of Environment and Conservation, 2005)
+
+Air pollution is monitored through various meteorological sites across Sydney and NSW, most commonly by the NSW department of planning, industry and the environment (DPIE) which have over 20 sites within the Greater Sydney area (DPIE, 2021). Another project is the School Weather and Air Quality (SWAQ) which has an additional 6 air monitoring stations located in or around school campuses (SWAQ, 2021). Additional stations can be found online such as the citizen science project, World Air Quality Index Project, which has approximately 10 additional air monitoring sites across Greater Sydney, however they don't have an easy method of accessing raw data collection (WAQIP, 2021).
+
+It would be beneficial in we were able to get an idea of the PM10 levels across Sydney at any give time. This would allow for tracking of smoke plums during bush fire season and generation of PM10 through industry sources. To do this we could substantially increase the number of air monitoring sites, building them at regularly spaced locations in and around Sydney, however this is unfeasible due to cost, expertise needed as well as maintenance. An alternative is to interpolate the values using the known values at known locations to predict unknown values across monitored regions of Sydney and potentially, larger areas of NSW. The most common forms of geospatial interpolation are Inverse Weight Distancing (IDW) which is computationally straightforward and Kriging which generally gives superior results but is significantly more computationally expensive to run.
+
+
+# Datasets
+
+```{r, include=FALSE}
+# AQI and SWAQ datset - Date, Hour, PM10 value, Sitename, Long, Lat, Region
+load("C:/Users/Declan/Desktop/STDS Assignment 3/AQI Data/working_databse/Combine_data_AQI_SWOQ_PM10_2019_2020_hourly.Rda")
+
+# details on stations - Site_id, SiteName, Long, Lat, Region
+load("C:/Users/Declan/Desktop/STDS Assignment 3/AQI Data/working_databse/station_details_added_SWOQ.Rda")
+```
+
+Two datasets have been used in this analysis. The first is the Air Quality Index (AQI) dataset. Values for a range of pollutants were captured every hour for 2019 and 2020, across all possible stations and downloaded using the AQI API interface. The stations used in the analysis were subsequently filtered to those within the Greater Sydney region. The latitude and longitude of the stations was stored in another file which was merged to contain all relevant information within the single file.
+
+The second dataset is that of the SWAQ dataset. Various pollutant levels are recorded every 20 minutes, for our purpose, only values on the hour were collected. The latitude and longitude were only detailed on the SQAQ website and were joined manually for each station. Both the AQI and the SWAQ datasets were combined into a single purpose database.
+
+# Methods
+
+The time frame for this analysis was chosen to be at 12pm on December 25th 2019. This was chosen as it's a date that a significant portion of people would be engaged in family activities in outdoor venues. It was also a day where Sydney wasn't completely engulfed in smoke allowing for larger variation in PM10 across the city. Any arbitrary date or hour could be chosen by modifying the 'Date' or 'Hour' option where date is in the format YYYY-MM-DD and hour can be between 1 and 24. 
+
+```{r, include = 'FALSE'}
+# Choose whatever Date of Hour
+chosen_date<-subset(Combine_data_AQI_SWOQ_PM10_2019_2020_hourly, Date=="2019-12-25")
+chosen_date<-subset(chosen_date, Hour==12)
+
+rm(Combine_data_AQI_SWOQ_PM10_2019_2020_hourly)
+```
+
+```{r, include = 'FALSE'}
+# Combine Date and hour and convert to POSIXct type
+chosen_date$date_time <- as.POSIXct(paste(chosen_date$Date, chosen_date$Hour),format = "%Y-%m-%d%H", tz='GMT')
+
+chosen_date<- subset(chosen_date, select = -c(Date, Hour))
+```
+
+```{r include = 'FALSE'}
+# Remove lat and long nd spread the frame
+chosen_date_spread<- subset(chosen_date,select = -c(Longitude, Latitude,Region)) 
+chosen_date_spread <- spread(chosen_date_spread,SiteName, Value)
+
+# only select stations with non Na for chosen time and date
+chosen_date_spread<-chosen_date_spread[, colSums(is.na(chosen_date_spread)) <= 0]
+chosen_date_spread[,-1][chosen_date_spread[,-1] <=0] <- 0  
+```
+
+```{r include = 'FALSE'}
+# Changes data from wide to long 
+station_value <- gather(chosen_date_spread, date_time)
+colnames(station_value) <- c("SiteName", "PM10")
+```
+
+```{r include = 'FALSE'}
+# only getSitename, Long and Lat from station details
+station_details<-subset(station_details, select = c(SiteName,Longitude,Latitude))
+```
+
+```{r include = 'FALSE'}
+# value , long ,lat
+used_site_details <- left_join(station_value, station_details, by = "SiteName")
+chosen_date_hour <- left_join(station_value, station_details, by = "SiteName")
+chosen_date_hour <- chosen_date_hour[,-1]
+```
+
+```{r include = FALSE}
+unused_stations<- subset(station_details,!(SiteName %in% used_site_details$SiteName))
+```
+
+A dataset containing PM10 values from stations within the Greater Sydney region (fig 1)  was generated. Further filtering to only numeric results and again filtering by values above 0 from these stations, only the stations shown in blue are used in the analysis while removed stations appear as red in fig 2. Stations record 'NA' when they were not operating. Due to instrument malfunction record values less than 0. These are not addressed earlier as due to the highly selective process of choosing a date and hour, it's unlikely an invalid numerical result will occur. 
+```{r, fig.cap= "Figure 1. Initial selection of monitoring stations within Greater Sydney region",fig.align = "center", echo = FALSE}
+
+longitude = range(used_site_details$Longitude)
+long_min = longitude[1]
+long_max = longitude[2]
+
+latitude = range(used_site_details$Latitude)
+lat_min = latitude[1]
+lat_max = latitude[2] 
+
+aqi_map <- leaflet() %>%
+  
+  fitBounds(long_min,lat_max,long_max,lat_min )%>%
+
+  addTiles() %>%
+  addMarkers(station_details$Longitude, #addCircleMarkers 
+             station_details$Latitude, 
+             popup = station_details$SiteName) 
+
+aqi_map
+```
+```{r, fig.cap= "Figure 2. Map of filtered air monitoring stations in blue, stations with no or unrealistic data are in red",fig.align = "center", echo = FALSE}
+
+
+longitude = range(used_site_details$Longitude)
+long_min = longitude[1]
+long_max = longitude[2]
+
+latitude = range(used_site_details$Latitude)
+lat_min = latitude[1]
+lat_max = latitude[2]
+
+awesome <- makeAwesomeIcon(
+  iconColor = "red",
+  markerColor = "red",
+  library = "fa"
+)
+
+
+aqi_map <- leaflet() %>%
+  
+  fitBounds(long_min,lat_max,long_max,lat_min )%>%
+
+  addTiles() %>%
+  addMarkers(used_site_details$Longitude, 
+             used_site_details$Latitude, 
+             popup = used_site_details$SiteName) %>%
+  addTiles()%>% 
+  addAwesomeMarkers(icon = awesome,
+                    unused_stations$Longitude, 
+             unused_stations$Latitude, 
+             popup = unused_stations$SiteName)  %>% 
+
+ addTiles() %>%
+  addRectangles(
+    lng1=long_min, lat1=lat_max,
+    lng2=long_max, lat2=lat_min,
+    fillColor = "transparent"
+  )
+
+aqi_map
+```
+
+```{r include = 'FALSE'}
+# convert to tibble
+chosen_date_hour_tibble<-as.tibble(chosen_date_hour)
+```
+
+
+
+```{r include = 'FALSE'}
+chosen_date_hour_sf <- st_as_sf(chosen_date_hour_tibble, coords = c("Longitude", "Latitude"), crs = "8058") %>% # testcrs = '+init=epsg:4326') %>% 
+  cbind(st_coordinates(.))
+```
+
+The empirical variogram is constructed from the dataset using the gstat package after the  coordinates were modified to a spatial coordinates. The variogram displays the variation of PM10 recorded by various stations as a function of distance. The semi-variance measure is defined as half the average squared difference between various points separated by a distance. A variogram is able to display potential autocorrelation of the underlying stochastic process (MacKenzie et al, 2018).
+
+```{r fig.cap= "Figure 3. Emperical variogram of PM10 ",fig.align = "center",echo = FALSE}
+# Create emperical Variogram
+
+my_v_emp_OK <- gstat::variogram(
+  PM10~1,
+  as(chosen_date_hour_sf, "Spatial") # coordinate type 
+  )
+
+plot(my_v_emp_OK,main="PM10 Emperical variogram ")
+```
+At this point we want to fit a model (nugget, model type, range, partial sill). Manually fitting a model can be intensive as the base packages in R such as gstat must converge in 200 iterations where small deviations from valid results can lead to the fit failing to converge. The automap package automates this process and tries to fit various model types. In this case, it modeled over 20 different models. The returned model is the one with the smallest residual sum of squares.
+
+```{r, fig.cap="Figure 4. Example of an idealised variogram long with various important model parameter meanings",fig.align = 'center', echo = FALSE}
+
+#https://stackoverflow.com/questions/49583819/variogram-plot-for-sill-nugget-range
+knitr::include_graphics("C:/Users/Declan/Desktop/STDS Assignment 3/variogram_example.png")
+```
+
+```{r, include = FALSE}
+# I will only keep the var_model part.
+
+#ordinary_kriging_variogram
+ordinary_kriging_variogram_auto <- automap::autofitVariogram(PM10~1, as(chosen_date_hour_sf, "Spatial"),verbose=TRUE)$var_model
+```
+
+
+```{r, fig.cap="Figure 5. Plot generated by automap package using ordinary kriging using auotfitVariogram on data",fig.align = 'center', echo = FALSE}
+plot(automap::autofitVariogram(PM10~1, as(chosen_date_hour_sf, "Spatial")))
+```
+
+We can see the result and see that it fits the empirical variogram reasonably well. 
+
+```{r, echo = FALSE}
+ordinary_kriging_variogram_auto
+```
+
+
+Now that we have a variogram to the data with the model parameters (3.042, 'Sph',41.844,0.118), we can go ahead and create a grid. The vertical and horizontal lengths of the bounding box have been calculated using the haversine formula with the final result in meters. The final grid points are approximately 1km x 1km in size.
+
+```{r include = FALSE}
+horizontal_distance <-ceiling(distHaversine(c(long_min,lat_min),c(long_max,lat_min))) # fixed latitude
+vertical_distance<- ceiling(distHaversine(c(long_min,lat_min),c(long_min,lat_max)))   # fixed longitude
+```
+
+
+```{r include=FALSE}
+chosen_date_hour_grid_sf <- chosen_date_hour_sf %>% 
+  st_bbox() %>% 
+  st_as_sfc() %>% 
+  st_make_grid(
+  cellsize = c(round(1000/horizontal_distance,5), round(1000/vertical_distance,5)), #horizontal, vertical  cellsize = c(0.05, 0.01)
+  what = "centers"
+  ) %>%
+  st_as_sf() %>%
+  cbind(., st_coordinates(.))
+
+chosen_date_hour_grid_sp <- as(chosen_date_hour_grid_sf, "Spatial") # converting to sp
+gridded(chosen_date_hour_grid_sp) <- TRUE             # informing the object that it is a grid
+chosen_date_hour_grid_sp <- as(chosen_date_hour_grid_sp, "SpatialPixels") # specifying what kind of grid
+```
+
+```{r, fig.cap="Figure 6. Generated grid that willl be used for Kriging",fig.align = 'center', echo = FALSE }
+
+ggplot(data =chosen_date_hour_grid_sf, aes(x = X, y = Y))+
+geom_point(size = 0.5)+
+  labs(title="Grid output (each vertical and horizontal distance is approx 1km)")
+```
+
+
+# Results and Discussion
+
+Before we do anything further, lets have a look at our initial data below in figure 7. The colour of each dot at each location is dependent on the PM10 concentration. Unfortunately, I was unable to work out a way to display the results over a map of Sydney. 
+
+```{r, include = FALSE}
+a = max(chosen_date_hour$PM10)
+
+round(a+5,-1)
+```
+
+```{r, fig.cap="Figure 7. Initial look at all the air pollution stations",fig.align = 'center', echo=FALSE}
+plot_of_individual_stations <- ggplot(
+  data = chosen_date_hour,
+  mapping = aes(x = Latitude, y = Longitude, color = PM10)
+) +
+  geom_point(size =5) + 
+  scale_color_viridis(option = "B",  limits = c(0, round(max(chosen_date_hour$PM10)+5,-1))) +
+  ggtitle(label = "Observation PM10 across various stations") +
+  theme_void() +
+    theme(
+      plot.title = element_text(hjust = 0.5)
+    )
+
+plot_of_individual_stations
+```
+
+## Ordinary Kriging
+
+The first spatial interpolation method we will employ will be Ordinary Kriging where the variation in the grid field is a deviation from a constant average across the entire grid (Cressie, 1988). It results in the best linear unbiased prediction. The linearity occurs due to the estimation coming from a weighted combination of all available locations. The method tries to set the mean residual error to 0 meaning its unbiased and it also tries to minimize error variance. 
+
+```{r include=FALSE}
+# Ordinary Kriging
+ordinary_krige_chosen <- krige(
+  PM10~1,                       # PM10 and  "~1" means "depends on mean"
+  as(chosen_date_hour_sf, "Spatial"), # input data in {sp} format
+  chosen_date_hour_grid_sp,                # locations to interpolate at
+  model = ordinary_kriging_variogram_auto           # the variogram model fitted above
+  )
+```
+```{r include=FALSE}
+ordinary_krige_chosen
+```
+
+Looking at the plot below (fig. 8), it appears there is an evening out of the PM10 values towards the borders of the grid, which is typically the farthest distance from a station location. The large yellow spots are attributed to the low PM10 concentrations observable in figure 7 as dark red circles. 
+
+```{r, fig.cap="Figure 8. Ordinary Kriging output",fig.align = 'center', echo=FALSE, message=FALSE,results = FALSE}
+ordinary_krige_chosen %>% as.data.frame %>%
+  ggplot(aes(x=coords.x1, y=coords.x2)) + geom_tile(aes(fill=var1.pred)) + coord_equal() +
+  scale_fill_gradient(low = "yellow", high="red") +
+  scale_x_continuous(labels=comma) + scale_y_continuous(labels=comma) +
+  xlab("Longitude") + ylab("Latitude")+labs(fill = "PM10")
+  theme_bw()
+
+```
+The default ordinary kriging model assumes the data is anisotropic, that there is no directional effect. We can investigate the potential variation due to direction based on bearings where 000 is north, 090 is east and so on. The impact of directionality may be due to a number of factors such as geological and weather features or effects such as mountain ranges, coastline, wind speed and direction, population density etc. The below plot looks at north, east, south, and west directions at 0,90,180 and 270 respectively. We can see very little variation leading to the assumption that our data is anisotropic. This may be due to fire season where there are multiple sources of PM10 generation leading to potentially even coverage of PM10 at the levels recorded. It also might be that the number of locations is too small to pick up any variation. There is a slight difference in the N-S plots(0,180) compared to the E-W (090,270) direction. 
+
+```{r, fig.cap="Figure 9. Ordinary Kriging: Assessing directionality ",fig.align = 'center', echo = FALSE}
+plot(variogram(PM10~1, chosen_date_hour_sf, alpha=c(000,090,180,270)),type="l",main = 'Ordinary kriging variograms with directionality based on bearing: North is 0')
+```
+We can further explore the potential directionality by creating variograms for each direction and fitting a model. Again we use the bearing as input to create 4 plots. The model used will be the spherical model. From the figure 10. below, we can see that the distribution of the variogram data points are similar and that the spherical model appears similar for each direction. We will proceed with the assumption that the data is anisotropic.
+
+```{r, fig.cap="Figure 10. Ordinary Kriging Leave one out cross validation",fig.align = 'center', echo = FALSE}
+
+directional_check <- gstat(id="Sine", formula=PM10 ~ 1, data=chosen_date_hour_sf)
+# Create directional variograms at 0, 45, 90, 135 degrees from north (y-axis)
+TheVariogram <- variogram(directional_check, alpha=c(0,90,180,270))
+
+# Create a new model 
+TheModel=vgm(model='Sph' , anis=c(0, 0.5))
+
+# Fit a model to the variogram
+FittedModel <- fit.variogram(TheVariogram, model=TheModel)
+
+## plot results:
+plot(TheVariogram, model=FittedModel, as.table=TRUE)
+```
+Leave one out cross validation (LOOCV) is performed as there are too few data points to perform K fold cross validation. This removes one station and predicts values for its location which we can then compare to the real value and see how it performed.
+
+The results of the LOOVC are shown below along with a summary output. The residuals can be viewed as a bubble plot where the colour is indicative of either positive or negative sign and the size is proportional to the size of the residual value at each location. We can see that the largest errors are correlated to the stations in figure 7 which were significantly lower compared to surrounding stations.
+
+```{r, fig.cap="Figure 11. Ordinary Kriging Leave one out cross validation",fig.align = 'center', echo = FALSE}
+
+ordinary_krige_leave_one_out_cv <- krige.cv(PM10~1, as(chosen_date_hour_sf, "Spatial"), ordinary_kriging_variogram_auto, nmax = 100, nfold=nrow(used_site_details))
+
+#ordinary_krige_leave_one_out_cv
+
+bubble(ordinary_krige_leave_one_out_cv, "residual", main = "PM10: Ordinary Kriging - Leave one out cross validation residuals")
+```
+```{r, include = FALSE }
+#summary(ordinary_krige_leave_one_out_cv$observed)
+ordinary_kriging_mean<-mean(ordinary_krige_leave_one_out_cv$residual) # mean error, ideally 0:
+ordinary_kriging_rmse<-sqrt(mean(ordinary_krige_leave_one_out_cv$residual^2)) # RMSE, ideally small
+ordinary_kriging_msne<-mean(ordinary_krige_leave_one_out_cv$zscore^2) # Mean square normalized error, ideally close to 1
+```
+Applying the autoKrige function to the data, we can generate a map of the predictions at various locations along with a plot of standard error and the fitted variogram. The automated process produces a similar plot seen in fig 9. where there is an trend towards homogeneous PM10 values at the edges. 
+
+```{r, fig.cap="Figure 12. Ordinary Kriging autoKrige output",fig.align = 'center', echo = FALSE}
+ordinary_kriging_result = autoKrige(PM10~1, as(chosen_date_hour_sf, "Spatial"), chosen_date_hour_grid_sp)
+plot(ordinary_kriging_result)
+```
+
+Due to the potential of outliers in the initial analysis which may have caused errors, we will also perform the analysis with outliers removed. The method used for outlier removal will be the interquartile range method.
+
+```{r include = FALSE}
+Q1 <- quantile(chosen_date_hour$PM10, .25)
+Q3 <- quantile(chosen_date_hour$PM10, .75)
+IQR <- IQR(chosen_date_hour$PM10)
+```
+
+```{r, include=FALSE}
+#only keep rows in dataframe that have values within 1.5*IQR of Q1 and Q3
+chosen_date_hour_no_outliers <- subset(chosen_date_hour, chosen_date_hour$PM10>(Q1 - 1.5*IQR) & chosen_date_hour$PM10< (Q3 + 1.5*IQR))
+
+cat('number of stations removed:', nrow(chosen_date_hour) -nrow(chosen_date_hour_no_outliers))
+``` 
+
+After the outliers were removed we are down from 22 stations to 19 stations. Next we will create a new variogram and again let autofitVariogram fit the optimal model. We can see that the model fails to capture the data point fitting a linear model to a clearly parabolic shape. Unfortunately there are no default variograms that reasonably match the data output as they tend to follow an inverted shape to the one seen in the figure. As such we will proceed with the original dataset with the outliers included.
+
+```{r, include = FALSE, result = FALSE}
+cat('test1')
+# convert to tibble
+chosen_date_hour_no_outliers_tibble<-as.tibble(chosen_date_hour_no_outliers)
+
+chosen_date_hour_no_outliers_sf <- st_as_sf(chosen_date_hour_no_outliers_tibble, coords = c("Longitude", "Latitude"), crs = "8058") %>% # testcrs = '+init=epsg:4326') %>% 
+  cbind(st_coordinates(.))
+```
+
+```{r, include = FALSE, echo=FALSE}
+#ordinary_kriging_variogram
+ordinary_kriging__no_outliers_variogram_auto <- automap::autofitVariogram(PM10~1, as(chosen_date_hour_no_outliers_sf, "Spatial"),verbose=TRUE)$var_model
+```
+
+```{r, fig.cap="Figure 13. Outliers removed autofit variogram",fig.align = 'center', echo = FALSE}
+plot(automap::autofitVariogram(PM10~1, as(chosen_date_hour_no_outliers_sf, "Spatial")))
+```
+## Universal Kriging
+
+Next we will try universal kriging using the autofitVariogram. This differs to ordinary kriging in that the mean is not considered equal but has a functional dependence on location. The terminology of drift is used which captures the tendency for the values to change as a function of the location (Kis, 2016).
+
+```{r include=FALSE}
+universal_kriging_variogram = autofitVariogram(PM10~1,
+    as(chosen_date_hour_sf, "Spatial")
+    )$var_model
+
+universal_kriging_model <- krige(
+  PM10~coords.x1+coords.x2, # Think "Z~X+Y" but {sp} conversion alters variable naming
+  as(chosen_date_hour_sf, "Spatial"), # input data in {sp} format (`X` --> `coords.x1`)
+  chosen_date_hour_grid_sp,                # locations to interpolate at
+  model = universal_kriging_variogram)
+```
+
+Plotting the output of universal kriging, we get the following image (fig 14). It initially looks very similar to the plot from ordinary kriging (fig 8.) Looking closely there is a slight difference in the bottom right section where the results tend to follow a smooth gradient in comparison to the observed 3 red points.
+```{r, fig.cap="Figure 14. Universal kriging prediction map",fig.align = 'center', message=FALSE, echo = FALSE}
+universal_kriging_model %>% as.data.frame %>%
+  ggplot(aes(x=coords.x1, y=coords.x2)) + geom_tile(aes(fill=var1.pred)) + coord_equal() +
+  scale_fill_gradient(low = "yellow", high="red") +
+  scale_x_continuous(labels=comma) + scale_y_continuous(labels=comma) +
+    xlab("Longitude") + ylab("Latitude")+labs(fill = "PM10")
+```
+
+```{r, include = FALSE}
+universal_kriging_model <- autoKrige(
+  PM10~coords.x1+coords.x2, 
+  as(chosen_date_hour_sf, 'Spatial'),
+  chosen_date_hour_grid_sp,
+  model = universal_kriging_variogram)
+
+prediction_universal_kriging_model_spdf = universal_kriging_model$krige_output
+prediction_universal_kriging_model_spdf
+```
+Again applying the autoKrige function we can generate a prediction and standard error map. These image (figure 15.) do show a obvious distinction in comparison to the results in figure 12. The main difference just from eyeballing the figures, is that the main difference is that the errors are look less like point sources and the gradient tends to even out as we move away from the stations around the center.
+```{r, fig.cap="Figure 15. Universal kriging autoKrige output",fig.align = 'center', echo = FALSE}
+plot(universal_kriging_model)
+```
+
+
+```{r, fig.cap="Figure 16. Universal kriging leave one out r",fig.align = 'center', include = FALSE}
+universal_krige_leave_one_out_cv <- krige.cv(PM10~1, as(chosen_date_hour_sf, "Spatial"), universal_kriging_variogram, nmax = 100, nfold=nrow(used_site_details))
+
+bubble(universal_krige_leave_one_out_cv, "residual", main = "PM10: Universal Kriging - Leave one out cross validation residuals")
+```
+
+```{r}
+
+#summary(universal_krige_leave_one_out_cv$observed)
+universal_kriging_mean<-mean(universal_krige_leave_one_out_cv$residual) # mean error, ideally 0:
+universal_kriging_rmse<-sqrt(mean(universal_krige_leave_one_out_cv$residual^2)) # RMSE, ideally small
+universal_kriging_mnse<-mean(universal_krige_leave_one_out_cv$zscore^2) # Mean square normalized error, ideally close to 1
+```
+## Inverse Distance Weighting (IDW)
+Finally Inverse Distance Weighting is used and relies upon deterministic assumptions. IDW is a much simpler method to implement compared to kriging algorithms. It differs in that it relies on the assumption that locations that are close in distance should be similar compared to those that are distant. Each predicted location is calculated using the nearest stations to make a prediction putting more emphasis on stations that are nearby and less emphasis on distant stations, hence the name.
+
+```{r, echo=FALSE}
+idw_model <- idw(
+  PM10~1,                       # idw also depends on mean
+  as(chosen_date_hour_sf, "Spatial"), # input data in {sp} format
+  chosen_date_hour_grid_sp,                # locations to interpolate at
+) 
+```
+
+```{r, fig.cap="Figure 17. Inverse Distance Weighting heatmap",fig.align = 'center', message=FALSE,results = FALSE}
+idw_model %>% as.data.frame %>%
+  ggplot(aes(x=coords.x1, y=coords.x2)) + geom_tile(aes(fill=var1.pred)) + coord_equal() +
+  scale_fill_gradient(low = "yellow", high="red") +
+  scale_x_continuous(labels=comma) + scale_y_continuous(labels=comma) +
+      xlab("Longitude") + ylab("Latitude")+labs(fill = "PM10")
+```   
+We an also perform LOOCV on the inverse distance weighting model to find the RMSE of 6.87
+```{r, include = FALSE}
+neighbors = nrow(chosen_date_hour-1)
+idw_model_2 = gstat(formula =PM10 ~ 1, # intercept only model
+                data = chosen_date_hour_sf, 
+                nmax = neighbors,
+                set = list(idp = 1))
+
+crossval <- gstat.cv(idw_model_2)
+```
+
+```{r, include = FALSE}
+RMSE <- function(residuals){
+  sqrt(sum((residuals)^2)/length(residuals))
+}
+```
+
+```{r, include = FALSE}
+idw_crossval_rmse <- RMSE(crossval$residual)
+idw_crossval_rmse
+```
+We will compare the RMSE of both types of kriging and the IDW method to determine which method was the most accurate. The RMSE of ordinary kriging and universal kriging was 7.00 while for IDW, it was 6.87. It is quite strange that both kriging results give the same error while producing different standard prediction and standard error plots (fig 11 and 14). The errors do change when the grid size is altered with Universal kriging recording a slightly lower RMSE of 6.89  when grid size is approx 100m x 100m although the computation takes a considerable while longer. Typically kriging methods will outperform IDW methods (Gong et al, 2014) however there is also evidence of IDW outpeforming kriging and other interpolation methods (Zarco-Perello & Simoes, 2017). If we had chosen a different hour and date or if we had access to more data, we might see that result. It might also be that this is an example of the no free lunch theorem.
+
+A problem with geospatial interpolation is that the station location may be assumed to be the source of PM10 which is not the case. This can explain what appear as point sources in figures 12 and 15. It may also be the case that the recorded value of the stations is the highest potential value which is likely wrong again if the station is far from the source of pollution. One such scenario may be that there is a PM10 source and lets say 1km east and west of the location are air monitoring stations. Various algorithms may assume the stations are point sources and assume that the PM10 concentration may drop between the sources when in this case, that is the opposite of what's happening. 
+
+We can see from this work and other similar bodies of work that a high number of location measurements are necessary to build a usable interpolation model. The number of stations available in this work is likely inadequate to draw significant conclusions on.
+
+# Future work
+
+While kriging is generally accepted to be one of the best interpolation methods for geospatial data, other simpler methods such as thin plate spline regression, nearest neighbours which is very similar to another method using thessian polygons. In addition there are also more advanced methods available such as land-use regression. Other kriging models such as cokriging may also improve the model where we can use multiple variables to krige, in our case, wind speed and direction may improve the model. Final complicatedly we could also add a temporal element, kriging over time. This has been attempted in one of the github Rmd files (github.com/DStockdale1/Sydney_PM10_Kriging/ spatial_temporal analysis.Rmd) but was too complicated along with a lack of documentation made progress very slow.
+
+# Conclusion
+Three models of spatial interpolation have been used to create a plot of particulate matter sub 10um (PM10) over the Greater Sydney region using the multiple air quality stations within the area. Due to the small number of air quality stations, the number of data points is low and may be reduced further due to instrument maintenance or malfunction at any given time. The first model uses ordinary kriging, the second uses universal kriging and the final model implements universal distance weighting
+
+
+# Acknowledgements
+
+https://swilke-geoscience.net/post/2020-09-10-kriging_with_r/kriging/
+https://rpubs.com/nabilabd/118172
+https://rpubs.com/hungle510/202760
+https://rstudio-pubs-static.s3.amazonaws.com/46259_d328295794034414944deea60552a942.html
+
+# Appendix
+
+```{r, echo=FALSE}
+ordinary_kriging_variogram_auto <- automap::autofitVariogram(PM10~1, as(chosen_date_hour_sf, "Spatial"),verbose=TRUE)$var_model
+```
+
+# References
+
+Clark, G., (2019), Sydney’s air quality worst in the world due to bushfires, Daily Telegraph, accessed on Novemebr 11 2021 from
+https://www.dailytelegraph.com.au/news/nsw/sydneys-air-quality-among-worst-in-the-world-due-to-bushfires/news-story/0c016c0575860fc371605542435832ad
+
+Cressie, N., (1998), Spatial prediction and ordinary kriging, Mathematical Geology, 20, 405–421,DOI https://doi.org/10.1007/BF00892986
+
+Department of Environment and Conservation, (2005), Air Pollution Economics - Health Costs of Air Pollution in the
+Greater Sydney Metropolitan Region 
+
+Department of Planning Industry and the Environment, (2021), Air quality map - Sydney, News South Wales Department of Planning, Industry and Environment, accessed on November 14 from https://www.dpie.nsw.gov.au/air-quality/air-quality-maps/sydney-map
+
+Fire and Rescue NSW,Fire and Rescue New South Wales Annual Report 2019-2020, (2020),  accessed on Novemeber 14 2021 from https://www.fire.nsw.gov.au/gallery/files/pdf/annual_reports/annual_report_2019_20.pdf
+
+Gong, G., Mattevada, S., O'Bryant, S.E., Comparison of the accuracy of kriging and IDW interpolations in estimating groundwater arsenic concentrations in Texas, Environmental Research, vol 30 pg 59-
+
+Kis, I,M., Comparison of Ordinary and Universal Kriging interpolation techniques on a depth variable (a case of linear spatial
+trend), case study of the Šandrovac Field, The Mining-Geology-Petroleum Engineering Bulletin, 10.17794/rgn.2016.2.4
+
+Li, J., Heap, A.D., (2017),  A Review of Spatial Interpolation Methods for Environmental Scientists, accessed November 14 2021 from https://data.gov.au/data/dataset/a-review-of-spatial-interpolation-methods-for-environmental-scientists
+
+MacKenzie, D.I.,  Nichols, J.D., Royle, J.A., Pollock, K.H., Bailey, L.L., Hines, J.E., Chapter 4 - Basic Presence/Absence Situation, Occupancy Estimation and Modeling (Second edition), Inferring Patterns and Dynamics of Species Occurrence, DOI 10.1016/B978-0-12-407197-1.00006-5
+
+Nguyen, K., Bullen, J., (2019), Sydney smoke three times worse this NSW bushfire season, but health effects from 'medium-term' exposure unclear, ABC news, accessed on Novemeber 14 2021 from https://www.abc.net.au/news/2019-12-03/sydney-air-quality-smoke-haze-worse-this-bushfire-season/11755546
+
+SWAQ, (2021), Empowering urban weather research with schools, accessed November 14 from https://www.swaq.org.au/
+
+WAQIP, 2021, Air Pollution in Sydney: Real-time Air Quality Index Visual Map, accessed on November 14 2021 from https://aqicn.org/map/sydney/
+
+World Helath Organisation (WHO), (2021), Ambient (outdoor) air pollution, accessed on NOvemeber 14 2021 from who.int/news-room/fact-sheets/detail/ambient-(outdoor)-air-quality-and-health
+
+Zarco-Perello, S., and Simões, N. (2014). Ordinary Kriging vs inverse distance weighting: spatial interpolation of the sessile community of Madagascar reef, Gulf of Mexico.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
