@@ -2,7 +2,8 @@
 
 Assignment as part of Statistical Thinking for Data Science subject
 
-Full report available here https://github.com/Declan-Stockdale/PM10_anaysis_greater_sydney/blob/master/Spatial%20interpolation%20of%20particulate%20matter%20across%20Greater%20Sydney.pdf
+Full report available here 
+https://github.com/Declan-Stockdale/PM10_anaysis_greater_sydney/blob/master/Spatial%20interpolation%20of%20particulate%20matter%20across%20Greater%20Sydney.pdf
 
 ## Overview
 This project analysed the particualte matter sub 10um (PM10) across Greater Sydney using data from the https://www.dpie.nsw.gov.au/air-quality/air-quality-concentration-data-updated-hourly
